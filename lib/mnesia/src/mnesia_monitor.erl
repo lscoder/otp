@@ -673,13 +673,15 @@ env() ->
      extra_db_nodes,
      ignore_fallback_at_startup,
      fallback_error_function,
+     fold_chunk_size,
      max_wait_for_decision,
      schema_location,
      core_dir,
      pid_sort_order,
      no_table_loaders,
      dc_dump_limit,
-     send_compressed
+     send_compressed,
+     filesystem_locations
     ].
 
 default_env(access_module) ->
@@ -711,6 +713,8 @@ default_env(ignore_fallback_at_startup) ->
     false;
 default_env(fallback_error_function) ->
     {mnesia, lkill};
+default_env(fold_chunk_size) ->
+    100;
 default_env(max_wait_for_decision) ->
     infinity;
 default_env(schema_location) ->
@@ -724,7 +728,9 @@ default_env(no_table_loaders) ->
 default_env(dc_dump_limit) ->
     4;
 default_env(send_compressed) ->
-    0.
+    0;
+default_env(filesystem_locations) ->
+    [].
 
 check_type(Env, Val) ->
     try do_check_type(Env, Val)
@@ -755,6 +761,8 @@ do_check_type(extra_db_nodes, L) when is_list(L) ->
 	     (A) when is_atom(A) -> true
 	  end,
     lists:filter(Fun, L);
+do_check_type(fold_chunk_size, I) when is_integer(I), I > 0;
+				       I =:= infinity -> I;
 do_check_type(max_wait_for_decision, infinity) -> infinity;
 do_check_type(max_wait_for_decision, I) when is_integer(I), I > 0 -> I;
 do_check_type(schema_location, M) -> media(M);
@@ -768,7 +776,8 @@ do_check_type(pid_sort_order, "standard") -> standard;
 do_check_type(pid_sort_order, _) -> false;
 do_check_type(no_table_loaders, N) when is_integer(N), N > 0 -> N;
 do_check_type(dc_dump_limit,N) when is_number(N), N > 0 -> N;
-do_check_type(send_compressed, L) when is_integer(L), L >= 0, L =< 9 -> L.
+do_check_type(send_compressed, L) when is_integer(L), L >= 0, L =< 9 -> L;
+do_check_type(filesystem_locations, L) when is_list(L) -> L.
 
 bool(true) -> true;
 bool(false) -> false.
