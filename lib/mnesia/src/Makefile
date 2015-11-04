@@ -64,6 +64,7 @@ MODULES= \
 	mnesia_recover \
 	mnesia_registry \
 	mnesia_schema\
+	mnesia_sext \
 	mnesia_snmp_hook \
 	mnesia_snmp_sup \
 	mnesia_subscr \
