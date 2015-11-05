@@ -2073,7 +2073,7 @@ prepare_op(_Tid, {op, change_table_copy_type,  N, FromS, ToS, TabDef}, _WaitFor)
 			false ->
 			    case ToS of
 				disc_copies ->
-				    mnesia_log:ets2dcd(Tab, dmp);
+				    mnesia_log:ets2dcd(FromS, Tab, dmp);
 				disc_only_copies ->
 				    mnesia_dumper:raw_named_dump_table(Tab, dmp)
 			    end,
