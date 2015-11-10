@@ -197,6 +197,9 @@ e_has_var(X, Pos) ->
 %% Start and stop
 
 start() ->
+    start([]).
+
+start_() ->
     {Time , Res} =  timer:tc(application, start, [?APPLICATION, temporary]),
 
     Secs = Time div 1000000,
@@ -232,7 +235,7 @@ patched_start([{Env, Val} | Tail]) when is_atom(Env) ->
 patched_start([Head | _]) ->
     {error, {bad_type, Head}};
 patched_start([]) ->
-    start().
+    start_().
 
 stop() ->
     case application:stop(?APPLICATION) of
