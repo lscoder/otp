@@ -1901,6 +1901,8 @@ raw_table_info(Tab, Item) ->
 		info_reply(?ets_info(Tab, Item), Tab, Item);
 	    disc_only_copies ->
 		info_reply(dets:info(Tab, Item), Tab, Item);
+            {ext, Alias, Mod} ->
+                info_reply(catch Mod:info(Alias, Tab, Item), Tab, Item);
 	    unknown ->
 		bad_info_reply(Tab, Item)
 	end
@@ -2013,15 +2015,26 @@ display_tab_info() ->
     MasterTabs = mnesia_recover:get_master_node_tables(),
     io:format("master node tables = ~p~n", [lists:sort(MasterTabs)]),
 
+    case get_backend_types() of
+	[] -> ok;
+	Ts -> list_backend_types(Ts, "backend types      = ")
+    end,
+
+    case get_index_plugins() of
+	[] -> ok;
+	Ps -> list_index_plugins(Ps, "index plugins      = ")
+    end,
+
     Tabs = system_info(tables),
 
-    {Unknown, Ram, Disc, DiscOnly} =
-	lists:foldl(fun storage_count/2, {[], [], [], []}, Tabs),
+    {Unknown, Ram, Disc, DiscOnly, Ext} =
+	lists:foldl(fun storage_count/2, {[], [], [], [], []}, Tabs),
 
     io:format("remote             = ~p~n", [lists:sort(Unknown)]),
     io:format("ram_copies         = ~p~n", [lists:sort(Ram)]),
     io:format("disc_copies        = ~p~n", [lists:sort(Disc)]),
     io:format("disc_only_copies   = ~p~n", [lists:sort(DiscOnly)]),
+    [io:format("~-19s= ~p~n", [atom_to_list(A), Ts]) || {A,Ts} <- Ext],
 
     Rfoldl = fun(T, Acc) ->
 		     Rpat =
@@ -2029,7 +2042,7 @@ display_tab_info() ->
 			     read_only ->
 				 lists:sort([{A, read_only} || A <- val({T, active_replicas})]);
 			     read_write ->
-				 table_info(T, where_to_commit)
+				 [fix_wtc(W) || W <- table_info(T, where_to_commit)]
 			 end,
 		     case lists:keysearch(Rpat, 1, Acc) of
 			 {value, {_Rpat, Rtabs}} ->
@@ -2042,12 +2055,60 @@ display_tab_info() ->
     Rdisp = fun({Rpat, Rtabs}) -> io:format("~p = ~p~n", [Rpat, Rtabs]) end,
     lists:foreach(Rdisp, lists:sort(Repl)).
 
-storage_count(T, {U, R, D, DO}) ->
+get_backend_types() ->
+    case ?catch_val({schema, user_property, mnesia_backend_types}) of
+	{'EXIT', _} ->
+	    [];
+	{mnesia_backend_types, Ts} ->
+	    lists:sort(Ts)
+    end.
+
+get_index_plugins() ->
+    case ?catch_val({schema, user_property, mnesia_index_plugins}) of
+	{'EXIT', _} ->
+	    [];
+	{mnesia_index_plugins, Ps} ->
+	    lists:sort(Ps)
+    end.
+
+
+list_backend_types([{A,M} | T] = Ts, Legend) ->
+    Indent = [$\s || _ <- Legend],
+    W = integer_to_list(
+	  lists:foldl(fun({Alias,_}, Wa) ->
+			      erlang:max(Wa, length(atom_to_list(Alias)))
+		      end, 0, Ts)),
+    io:fwrite(Legend ++ "~-" ++ W ++ "s - ~s~n",
+	      [atom_to_list(A), atom_to_list(M)]),
+    [io:fwrite(Indent ++ "~-" ++ W ++ "s - ~s~n",
+	       [atom_to_list(A1), atom_to_list(M1)])
+     || {A1,M1} <- T].
+
+list_index_plugins([{N,M,F} | T] = Ps, Legend) ->
+    Indent = [$\s || _ <- Legend],
+    W = integer_to_list(
+	  lists:foldl(fun({N1,_,_}, Wa) ->
+			      erlang:max(Wa, length(pp_ix_name(N1)))
+		      end, 0, Ps)),
+    io:fwrite(Legend ++ "~-" ++ W ++ "s - ~s:~s~n",
+	      [pp_ix_name(N), atom_to_list(M), atom_to_list(F)]),
+    [io:fwrite(Indent ++ "~-" ++ W ++ "s - ~s:~s~n",
+	       [pp_ix_name(N1), atom_to_list(M1), atom_to_list(F1)])
+     || {N1,M1,F1} <- T].
+
+pp_ix_name(N) ->
+    lists:flatten(io_lib:fwrite("~w", [N])).
+
+fix_wtc({N, {ext,A,_}}) -> {N, A};
+fix_wtc({N,A}) when is_atom(A) -> {N, A}.
+
+storage_count(T, {U, R, D, DO, Ext}) ->
     case table_info(T, storage_type) of
-	unknown -> {[T | U], R, D, DO};
-	ram_copies -> {U, [T | R], D, DO};
-	disc_copies -> {U, R, [T | D], DO};
-	disc_only_copies -> {U, R, D, [T | DO]}
+	unknown -> {[T | U], R, D, DO, Ext};
+	ram_copies -> {U, [T | R], D, DO, Ext};
+	disc_copies -> {U, R, [T | D], DO, Ext};
+	disc_only_copies -> {U, R, D, [T | DO], Ext};
+        {ext, A, _} -> {U, R, D, DO, orddict:append(A, T, Ext)}
     end.
 
 system_info(Item) ->
@@ -2062,9 +2123,10 @@ system_info2(all) ->
 system_info2(db_nodes) ->
     DiscNs = ?catch_val({schema, disc_copies}),
     RamNs = ?catch_val({schema, ram_copies}),
+    ExtNs = ?catch_val({schema, external_copies}),
     if
-	is_list(DiscNs), is_list(RamNs) ->
-	    DiscNs ++ RamNs;
+	is_list(DiscNs), is_list(RamNs), is_list(ExtNs) ->
+	    DiscNs ++ RamNs ++ ExtNs;
 	true ->
 	    case mnesia_schema:read_nodes() of
 		{ok, Nodes} -> Nodes;
@@ -2168,6 +2230,7 @@ system_info2(access_module) -> mnesia_monitor:get_env(access_module);
 system_info2(auto_repair) -> mnesia_monitor:get_env(auto_repair);
 system_info2(is_running) -> mnesia_lib:is_running();
 system_info2(backup_module) -> mnesia_monitor:get_env(backup_module);
+system_info2(backend_types) -> mnesia_schema:backend_types();
 system_info2(event_module) -> mnesia_monitor:get_env(event_module);
 system_info2(debug) -> mnesia_monitor:get_env(debug);
 system_info2(dump_log_load_regulation) -> mnesia_monitor:get_env(dump_log_load_regulation);
@@ -2204,6 +2267,7 @@ system_info_items(yes) ->
     [
      access_module,
      auto_repair,
+     backend_types,
      backup_module,
      checkpoints,
      db_nodes,
