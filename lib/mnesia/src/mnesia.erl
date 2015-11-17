@@ -82,7 +82,7 @@
 	 system_info/0,                      % Not for public use
 
 	 %% Database mgt
-	 create_schema/1, delete_schema/1,
+	 create_schema/1, create_schema/2, delete_schema/1,
 	 backup/1, backup/2, traverse_backup/4, traverse_backup/6,
 	 install_fallback/1, install_fallback/2,
 	 uninstall_fallback/0, uninstall_fallback/1,
@@ -2361,7 +2361,10 @@ load_mnesia_or_abort() ->
 %% Database mgt
 
 create_schema(Ns) ->
-    mnesia_bup:create_schema(Ns).
+    create_schema(Ns, []).
+
+create_schema(Ns, Properties) ->
+    mnesia_bup:create_schema(Ns, Properties).
 
 delete_schema(Ns) ->
     mnesia_schema:delete_schema(Ns).

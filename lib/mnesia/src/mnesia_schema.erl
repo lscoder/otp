@@ -55,7 +55,7 @@
          dump_tables/1,
          ensure_no_schema/1,
 	 get_create_list/1,
-         get_initial_schema/2,
+         get_initial_schema/3,
 	 get_table_properties/1,
          info/0,
          info/1,
@@ -525,15 +525,49 @@ do_read_disc_schema(Fname, Keep) ->
     Res.
 
 get_initial_schema(SchemaStorage, Nodes) ->
+    get_initial_schema(SchemaStorage, Nodes, []).
+
+get_initial_schema(SchemaStorage, Nodes, Properties) ->	%
+    UserProps = initial_schema_properties(Properties),
     Cs = #cstruct{name = schema,
 		  record_name = schema,
-		  attributes = [table, cstruct]},
+		  attributes = [table, cstruct],
+		  user_properties = UserProps},
     Cs2 =
 	case SchemaStorage of
         ram_copies -> Cs#cstruct{ram_copies = Nodes};
         disc_copies -> Cs#cstruct{disc_copies = Nodes}
     end,
     cs2list(Cs2).
+
+initial_schema_properties(Props0) ->
+    DefaultProps = remove_duplicates(mnesia_monitor:get_env(schema)),
+    Props = lists:foldl(
+	      fun({K,V}, Acc) ->
+		      lists:keystore(K, 1, Acc, {K,V})
+	      end, DefaultProps, remove_duplicates(Props0)),
+    initial_schema_properties_(Props).
+
+initial_schema_properties_([{backend_types, Types}|Props]) ->
+    lists:foreach(fun({Name, Module}) ->
+			  verify_backend_type(Name, Module)
+		  end, Types),
+    [{mnesia_backend_types, Types}|initial_schema_properties_(Props)];
+initial_schema_properties_([{index_plugins, Plugins}|Props]) ->
+    lists:foreach(fun({Name, Module, Function}) ->
+			  verify_index_plugin(Name, Module, Function)
+		  end, Plugins),
+    [{mnesia_index_plugins, Plugins}|initial_schema_properties_(Props)];
+initial_schema_properties_([P|_Props]) ->
+    mnesia:abort({bad_schema_property, P});
+initial_schema_properties_([]) ->
+    [].
+
+remove_duplicates([{K,_} = H|T]) ->
+    [H | remove_duplicates([X || {K1,_} = X <- T,
+				 K1 =/= K])];
+remove_duplicates([]) ->
+    [].
 
 read_cstructs_from_disc() ->
     %% Assumptions:
@@ -1057,6 +1091,48 @@ check_active([{badrpc, Reason} | _Replies], Expl, Tab) ->
 check_active([], _Expl, _Tab) ->
     ok.
 
+verify_backend_type(Name, Module) ->
+    case legal_backend_name(Name) of
+	false ->
+	    mnesia:abort({bad_type, {backend_type,Name,Module}});
+	true ->
+	    ok
+    end,
+    ExpectedExports = mnesia_backend_type:behaviour_info(callbacks),
+    Exports = try Module:module_info(exports)
+              catch
+                  error:_ ->
+                      mnesia:abort({undef_backend, Module})
+              end,
+    case ExpectedExports -- Exports of
+        [] ->
+	    ok;
+        _Other ->
+	    io:fwrite(user, "Missing backend_type exports: ~p~n", [_Other]),
+            mnesia:abort({bad_type, {backend_type,Name,Module}})
+    end.
+
+legal_backend_name(Name) ->
+    is_atom(Name) andalso
+                    (not lists:member(Name, record_info(fields, cstruct))).
+
+verify_index_plugin({A} = Name, Module, Function)
+  when is_atom(A), is_atom(Module), is_atom(Function) ->
+    case code:ensure_loaded(Module) of
+	{error, nofile} ->
+	    mnesia:abort({bad_type, {index_plugin,Name,Module,Function}});
+	{module,_} ->
+	    %% Index plugins are called as Module:Function(Tab, Pos, Obj)
+	    case erlang:function_exported(Module, Function, 3) of
+		true ->
+		    ok;
+		false ->
+		    mnesia:abort(
+		      {bad_type, {index_plugin,Name,Module,Function}})
+	    end
+    end;
+verify_index_plugin(Name, Module, Function) ->
+    mnesia:abort({bad_type, {index_plugin,Name,Module,Function}}).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Here's the real interface function to create a table
 
