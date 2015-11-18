@@ -29,6 +29,7 @@
 -module(mnesia_schema).
 
 -export([
+	 index_plugins/0,
          add_snmp/2,
          add_table_copy/3,
          add_table_index/2,
@@ -213,7 +214,13 @@ do_set_schema(Tab, Cs) ->
     set({Tab, record_name}, RecName),
     set({Tab, record_validation}, {RecName, Arity, Type}),
     set({Tab, wild_pattern}, wild(RecName, Arity)),
-    set({Tab, index}, Cs#cstruct.index),
+    set({Tab, index}, [P || {P,_,_} <- Cs#cstruct.index]),
+    case Cs#cstruct.index of
+        [] ->
+            set({Tab, index_info}, mnesia_index:index_info(Type, []));
+        _ ->
+            ignore
+    end,
     %% create actual index tabs later
     set({Tab, cookie}, Cs#cstruct.cookie),
     set({Tab, version}, Cs#cstruct.version),
@@ -854,6 +861,9 @@ pick(Tab, Key, List, Default) ->
 get_ext_types() ->
     get_schema_user_property(mnesia_backend_types).
 
+get_index_plugins() ->
+    get_schema_user_property(mnesia_index_plugins).
+
 get_schema_user_property(Key) ->
     Tab = schema,
     %% Must work reliably both within transactions and outside of transactions
@@ -960,19 +970,29 @@ verify_cstruct(Cs) when is_record(Cs, cstruct) ->
     verify({alt, [nil, list]}, mnesia_lib:etype(Index),
 	   {bad_type, Tab, {index, Index}}),
 
+    IxPlugins = get_index_plugins(),
+
+    AllowIndexOnKey = check_if_allow_index_on_key(),
     IxFun =
-        fun(Pos) ->
-                verify(true, fun() ->
-                                     if
-					 is_integer(Pos),
-                                         Pos > 2,
-                                         Pos =< Arity ->
-                                             true;
-                                         true -> false
-                                     end
-                             end,
-                       {bad_type, Tab, {index, [Pos]}})
-        end,
+	fun(Pos) ->
+		verify(
+		  true, fun() ->
+				I = index_pos(Pos),
+				case Pos of
+				    {_, T, X} ->
+					(X==user orelse X==default)
+					    andalso
+					      (T==bag orelse T==ordered)
+					    andalso good_ix_pos(
+						      I, AllowIndexOnKey,
+						      Arity, IxPlugins);
+				    _ ->
+					good_ix_pos(Pos, AllowIndexOnKey,
+						    Arity, IxPlugins)
+				end
+			end,
+		  {bad_type, Tab, {index, [Pos]}})
+	end,
     lists:foreach(IxFun, Index),
 
     LC = Cs#cstruct.local_content,
@@ -1014,6 +1034,24 @@ verify_cstruct(Cs) when is_record(Cs, cstruct) ->
             ok;
         Version ->
             mnesia:abort({bad_type, Tab, {version, Version}})
+    end.
+
+good_ix_pos({_} = P, _, _, Plugins) ->
+    lists:keymember(P, 1, Plugins);
+good_ix_pos(I, true, Arity, _) when is_integer(I) ->
+    I >= 0 andalso I =< Arity;
+good_ix_pos(I, false, Arity, _) when is_integer(I) ->
+    I > 2 andalso I =< Arity;
+good_ix_pos(_, _, _, _) ->
+    false.
+
+
+check_if_allow_index_on_key() ->
+    case mnesia_monitor:get_env(allow_index_on_key) of
+	true ->
+	    true;
+	_ ->
+	    false
     end.
 
 verify_nodes(Cs) ->
@@ -1151,6 +1189,48 @@ legal_backend_name(Name) ->
     is_atom(Name) andalso
                     (not lists:member(Name, record_info(fields, cstruct))).
 
+add_index_plugin(Name, Module, Function) ->
+    schema_transaction(
+      fun() -> do_add_index_plugin(Name, Module, Function) end).
+
+do_add_index_plugin(Name, Module, Function) ->
+    verify_index_plugin(Name, Module, Function),
+    Plugins = case do_read_table_property(schema, mnesia_index_plugins) of
+		  undefined ->
+		      [];
+		  {_, Ps} ->
+		      case lists:keymember(Name, 1, Ps) of
+			  true ->
+			      mnesia:abort({index_plugin_already_exists, Name});
+			  false ->
+			      Ps
+		      end
+	      end,
+    do_write_table_property(schema, {mnesia_index_plugins,
+				     [{Name, Module, Function}|Plugins]}).
+
+delete_index_plugin(P) ->
+    schema_transaction(
+      fun() -> do_delete_index_plugin(P) end).
+
+do_delete_index_plugin({A} = P) when is_atom(A) ->
+    Plugins = get_index_plugins(),
+    case lists:keyfind(P, 1, Plugins) of
+	false ->
+	    mnesia:abort({no_exists, {index_plugin, P}});
+	_Found ->
+	    case ets:select(mnesia_gvar,
+			    [{ {{'$1',{index,{P,'_'}}},'_'},[],['$1']},
+			     { {{'$1',{index,P}},'_'},[],['$1']}], 1) of
+		{[_], _} ->
+		    mnesia:abort({plugin_in_use, P});
+		'$end_of_table' ->
+		    do_write_table_property(
+		      schema, {mnesia_index_plugins,
+			       lists:keydelete(P, 1, Plugins)})
+	    end
+    end.
+
 verify_index_plugin({A} = Name, Module, Function)
   when is_atom(A), is_atom(Module), is_atom(Function) ->
     case code:ensure_loaded(Module) of
@@ -1168,6 +1248,12 @@ verify_index_plugin({A} = Name, Module, Function)
     end;
 verify_index_plugin(Name, Module, Function) ->
     mnesia:abort({bad_type, {index_plugin,Name,Module,Function}}).
+
+
+%% Used e.g. by mnesia:system_info(backend_types).
+index_plugins() ->
+    get_index_plugins().
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Here's the real interface function to create a table
 
