@@ -85,6 +85,9 @@ init(Parent) ->
     mnesia_bup:tm_fallback_start(IgnoreFallback),
     mnesia_schema:init(IgnoreFallback),
 
+    %% Initialize backend plugins
+    mnesia_schema:init_backends(),
+
     %% Handshake and initialize transaction recovery
     mnesia_recover:init(),
     Early = mnesia_monitor:init(),

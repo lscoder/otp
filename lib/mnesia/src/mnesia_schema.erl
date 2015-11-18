@@ -60,6 +60,7 @@
          info/0,
          info/1,
          init/1,
+	 init_backends/0,
          insert_cstruct/3,
 	 is_remote_member/1,
          list2cs/1,
@@ -144,6 +145,21 @@ init(IgnoreFallback) ->
     set({schema, load_node}, node()),
     set({schema, load_reason}, initial),
     mnesia_controller:add_active_replica(schema, node()).
+
+init_backends() ->
+    Backends = lists:foldl(fun({Alias, Mod}, Acc) ->
+				   orddict:append(Mod, Alias, Acc)
+			   end, orddict:new(), get_ext_types()),
+    [init_backend(Mod, Aliases) || {Mod, Aliases} <- Backends],
+    ok.
+
+init_backend(Mod, [_|_] = Aliases) ->
+    case Mod:init_backend() of
+	ok ->
+	    Mod:add_aliases(Aliases);
+	Error ->
+	    mnesia:abort({backend_init_error, Error})
+    end.
 
 exit_on_error({error, Reason}) ->
     exit(Reason);
@@ -833,6 +849,25 @@ pick(Tab, Key, List, Default) ->
             Value;
 	{value, BadArg} ->
 	    mnesia:abort({bad_type, Tab, BadArg})
+    end.
+
+get_ext_types() ->
+    get_schema_user_property(mnesia_backend_types).
+
+get_schema_user_property(Key) ->
+    Tab = schema,
+    %% Must work reliably both within transactions and outside of transactions
+    Res = case get(mnesia_activity_state) of
+	      undefined ->
+		  dirty_read_table_property(Tab, Key);
+	      _ ->
+		  do_read_table_property(Tab, Key)
+	  end,
+    case Res of
+	undefined ->
+	    [];
+	{_, Types} ->
+	    Types
     end.
 
 %% Convert attribute name to integer if neccessary
@@ -1797,22 +1832,38 @@ do_read_table_property(Tab, Key) ->
     {_, _, Ts} = TidTs,
     Store = Ts#tidstore.store,
     Props = ets:foldl(
-	      fun({op, create_table, [{name, T}|Opts]}, _Acc)
-		 when T==Tab ->
+	      fun({op, announce_im_running,_,Opts,_,_}, _Acc) when Tab==schema ->
+		      find_props(Opts);
+		 ({op, create_table, [{name, T}|Opts]}, _Acc)
+		    when T==Tab ->
 		      find_props(Opts);
 		 ({op, Op, [{name,T}|Opts], _Prop}, _Acc)
-		 when T==Tab, Op==write_property; Op==delete_property ->
+		 when T==Tab, Op==write_property;
+		      T==Tab, Op==delete_property ->
 		      find_props(Opts);
 		 ({op, delete_table, [{name,T}|_]}, _Acc)
 		 when T==Tab ->
 		      [];
 		 (_Other, Acc) ->
 		      Acc
-	      end, [], Store),
-    case lists:keysearch(Key, 1, Props) of
-	{value, Property} ->
-	    Property;
-	false ->
+	      end, undefined, Store),
+    case Props of
+        undefined ->
+            get_tid_ts_and_lock(Tab, read),
+	    dirty_read_table_property(Tab, Key);
+        _ when is_list(Props) ->
+            case lists:keyfind(Key, 1, Props) of
+		false ->
+		    undefined;
+		Other ->
+		    Other
+            end
+    end.
+
+dirty_read_table_property(Tab, Key) ->
+    try ets:lookup_element(mnesia_gvar, {Tab,user_property,Key}, 2)
+    catch
+	error:_ ->
 	    undefined
     end.
 
